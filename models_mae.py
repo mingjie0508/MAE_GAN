@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 # --------------------------------------------------------
 # References:
+# MAE: https://github.com/facebookresearch/mae
 # timm: https://github.com/rwightman/pytorch-image-models/tree/master/timm
 # DeiT: https://github.com/facebookresearch/deit
 # --------------------------------------------------------
@@ -94,8 +95,10 @@ class MaskedAutoencoderViT(nn.Module):
 
     def patchify(self, imgs):
         """
-        imgs: (N, 3, H, W)
-        x: (N, L, patch_size**2 *3)
+        Splits images into patches.
+
+        :param imgs: (N, 3, H, W)
+        :return: (N, L, p*p*3)
         """
         p = self.patch_embed.patch_size[0]
         assert imgs.shape[2] == imgs.shape[3] and imgs.shape[2] % p == 0
@@ -108,8 +111,10 @@ class MaskedAutoencoderViT(nn.Module):
 
     def unpatchify(self, x):
         """
-        x: (N, L, patch_size**2 *3)
-        imgs: (N, 3, H, W)
+        Merges patches into images.
+
+        :param x: (N, L, p*p*3)
+        :return: (N, 3, H, W)
         """
         p = self.patch_embed.patch_size[0]
         h = w = int(x.shape[1]**.5)
@@ -124,7 +129,13 @@ class MaskedAutoencoderViT(nn.Module):
         """
         Perform per-sample random masking by per-sample shuffling.
         Per-sample shuffling is done by argsort random noise.
-        x: [N, L, D], sequence
+
+        :param x: [N, L, D]
+        :param mask_ratio: float
+        :return: Tuple:
+            * x_masked: [N, L', D]
+            * mask: [N, L]
+            * ids_restore: [N, L']
         """
         N, L, D = x.shape  # batch, length, dim
         len_keep = int(L * (1 - mask_ratio))
@@ -148,6 +159,13 @@ class MaskedAutoencoderViT(nn.Module):
         return x_masked, mask, ids_restore
 
     def forward_encoder(self, x, mask_ratio):
+        """
+        Encodes visible patches.
+
+        :param x: [N, 3, H, W]
+        :param mask_ratio: float
+        :return: [N, L, D]
+        """
         # embed patches
         x = self.patch_embed(x)
 
@@ -170,6 +188,13 @@ class MaskedAutoencoderViT(nn.Module):
         return x, mask, ids_restore
 
     def forward_decoder(self, x, ids_restore):
+        """
+        Decodes embeddings and outputs image patches.
+
+        :param x: [N, L, D]
+        :param ids_restore: [N, L]
+        :return: [N, L, p*p*3]
+        """
         # embed tokens
         x = self.decoder_embed(x)
 
@@ -197,9 +222,12 @@ class MaskedAutoencoderViT(nn.Module):
 
     def forward_loss(self, imgs, pred, mask):
         """
-        imgs: [N, 3, H, W]
-        pred: [N, L, p*p*3]
-        mask: [N, L], 0 is keep, 1 is remove, 
+        Computes MSE loss over visbile patches.
+
+        :param imgs: [N, 3, H, W]
+        :param pred: [N, L, p*p*3]
+        :param mask: [N, L], 0 is keep, 1 is remove
+        :return: float
         """
         target = self.patchify(imgs)
         if self.norm_pix_loss:
@@ -212,7 +240,22 @@ class MaskedAutoencoderViT(nn.Module):
 
         loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
         return loss
+    
+    def forward_boundary_loss(self, imgs):
+        """
+        Computes MAE loss over pairs of pixels on patch boundaries.
 
+        :param imgs: [N, 3, H, W]
+        :return: float
+        """
+        p = self.patch_embed.patch_size[0]
+        loss = 0
+        n = imgs.shape[-1]//p
+        for i in range(1, n):
+            loss += (imgs[:,:,i*p-1,:] - imgs[:,:,i*p,:]).abs().mean()
+            loss += (imgs[:,:,:,i*p-1] - imgs[:,:,:,i*p]).abs().mean()
+        return loss / (n-1) / 2
+    
     def forward(self, imgs, mask_ratio=0.75):
         latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)
         pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
