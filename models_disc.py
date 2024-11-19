@@ -14,9 +14,23 @@ class Discriminator(nn.Module):
         self.discriminator = timm.create_model(
             model_name, pretrained=True, num_classes=1
         )
+        # neighbouring patches overlap, helps with training
+        self.overlap = 2
+        self.discriminator.patch_embed.strict_img_size = False
+        self.discriminator.patch_embed.proj = nn.Conv2d(
+            3,
+            self.discriminator.embed_dim,
+            kernel_size=16+2*self.overlap,
+            stride=16,
+        )
         self.criterion = nn.BCEWithLogitsLoss()
     
     def forward(self, x):
+        # pad borders of input image, neighbouring patches overlap
+        x = nn.functional.pad(
+            x, (self.overlap, self.overlap, self.overlap, self.overlap), 
+            mode='replicate'
+        )
         return self.discriminator(x)
     
     def get_loss(self, output, label):
