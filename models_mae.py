@@ -169,23 +169,28 @@ class MaskedAutoencoderViT(nn.Module):
             * mask: [N, L]
             * ids_restore: [N, L']
         """
-        N, L, D = x.shape  # batch, length, dim
+        # N = batch size (e.g., 32 images)
+        # L = number of patches = (224/16)^2 = 14^2 = 196 patches
+        # D = embedding dimension for each patch (e.g., 768)
+        N, L, D = x.shape  # batch, length, dim 
+        # e.g., 224 // 16 = 14 (patches in one dimension)
         SQRT_L = self.patch_embed.img_size[0] // self.patch_embed.patch_size[0]
         mask_ratio = 0.25
-        len_keep = int(L * (1 - mask_ratio))
+        len_keep = int(L * (1 - mask_ratio)) # 75% of patches: 196 * 0.75 = 147
 
         # set lower quadrant to keep
-        noise = torch.zeros(N, SQRT_L, SQRT_L, device=x.device)
-        noise[:,SQRT_L//2:,SQRT_L//2:] = 1.0
-        noise = torch.flatten(noise, start_dim=1)
+        noise = torch.zeros(N, SQRT_L, SQRT_L, device=x.device) # (batch, 14, 14)
+        noise[:,SQRT_L//2:,SQRT_L//2:] = 1.0                    # set bottom-right 7x7 patches to 1.0
+        noise = torch.flatten(noise, start_dim=1)               # (batch, 14*14)
 
         # sort noise for each sample
         ids_shuffle = torch.argsort(noise, dim=1)  # ascend: small is keep, large is remove
-        ids_restore = torch.argsort(ids_shuffle, dim=1)
+        ids_restore = torch.argsort(ids_shuffle, dim=1) 
 
         # keep the first subset
         ids_keep = ids_shuffle[:, :len_keep]
-        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+        # ids_keep.unsqueeze(-1): (batch, 147, 1) => .repeat(1, 1, D): (batch, 147, 768), L' = 147
+        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))  # visible patches
 
         # generate the binary mask: 0 is keep, 1 is remove
         mask = torch.ones([N, L], device=x.device)
@@ -289,12 +294,16 @@ class MaskedAutoencoderViT(nn.Module):
         :param imgs: [N, 3, H, W]
         :return: float
         """
-        p = self.patch_embed.patch_size[0]
+        p = self.patch_embed.patch_size[0]  # patch size: 16
         loss = 0
-        n = imgs.shape[-1]//p
+        n = imgs.shape[-1]//p  # number of patches in one dimension (e.g. 224//16 = 14)
+
         for i in range(1, n):
-            loss += (imgs[:,:,i*p-1,:] - imgs[:,:,i*p,:]).abs().mean()
-            loss += (imgs[:,:,:,i*p-1] - imgs[:,:,:,i*p]).abs().mean()
+            # Vertical boundaries: compare pixels across vertical patch edges
+            # i*p-1: last pixel of current patch, i*p: first pixel of next patch
+            loss += (imgs[:,:,i*p-1,:] - imgs[:,:,i*p,:]).abs().mean()  # - (n-1) vertical boundaries
+            # Horizontal boundaries: compare pixels across horizontal patch edges
+            loss += (imgs[:,:,:,i*p-1] - imgs[:,:,:,i*p]).abs().mean()  # - (n-1) horizontal boundaries
         return loss / (n-1) / 2
     
     def forward(self, imgs, mask_ratio=0.75, mask_mode='random'):
