@@ -241,17 +241,27 @@ class MaskedAutoencoderViT(nn.Module):
         :param ids_restore: [N, L]
         :return: [N, L, p*p*3]
         """
-        # embed tokens
-        x = self.decoder_embed(x)
+        # Input x: [N, L_visible + 1, D] (e.g., [N, 49+1=50, D])
+        # ids_restore: [N, L] = [N, 196]
+        # L_visible = 49 patches + 1 cls token (suppose mask_ratio = 0.75, 196*0.75 = 49)
 
-        # append mask tokens to sequence
+        # embed tokens
+        x = self.decoder_embed(x)  # [N, 50, decoder_dim]
+
+        # append mask tokens to sequence, mask_tokens: [N, 196+1-50=147, decoder_dim]
         mask_tokens = self.mask_token.repeat(x.shape[0], ids_restore.shape[1] + 1 - x.shape[1], 1)
-        x_ = torch.cat([x[:, 1:, :], mask_tokens], dim=1)  # no cls token
+        # 2. Add mask tokens:
+        # [V1|V2|...|V49|M1|M2|...|M147]
+        x_ = torch.cat([x[:, 1:, :], mask_tokens], dim=1)  # no cls token, [N, (50-1)+147=196, decoder_dim]
+        # 3. Restore ordering using ids_restore:
+        # [P1|P2|...|P196]  (P = either V or M, now in correct positions)
         x_ = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2]))  # unshuffle
-        x = torch.cat([x[:, :1, :], x_], dim=1)  # append cls token
+        # 4. Add cls back:
+        # [CLS|P1|P2|...|P196]
+        x = torch.cat([x[:, :1, :], x_], dim=1)  # append cls token, [N, 196+1=197, decoder_dim]
 
         # add pos embed
-        x = x + self.decoder_pos_embed
+        x = x + self.decoder_pos_embed  # self.decoder_pos_embed: [1, 197, D]
 
         # apply Transformer blocks
         for blk in self.decoder_blocks:
