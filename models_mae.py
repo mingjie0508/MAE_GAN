@@ -14,6 +14,7 @@ from functools import partial
 
 import torch
 import torch.nn as nn
+from torchvision.transforms.functional import gaussian_blur
 
 from timm.models.vision_transformer import PatchEmbed, Block
 
@@ -152,6 +153,32 @@ class MaskedAutoencoderViT(nn.Module):
 
         # generate the binary mask: 0 is keep, 1 is remove
         mask = torch.ones([N, L], device=x.device)
+        mask[:, :len_keep] = 0.0
+        # unshuffle to get the binary mask
+        mask = torch.gather(mask, dim=1, index=ids_restore)
+
+        return x_masked, mask, ids_restore
+    
+    def discrete_masking(self, x, mask):
+        # discretize mask using maxpool
+        N, L, D = x.shape  # batch, length, dim
+        p = self.patch_embed.patch_size[0]
+        maxpool = nn.MaxPool2d(kernel_size=p)
+        mask = maxpool(mask).view(-1)
+
+        len_keep = int((1-mask).sum().cpu())
+        mask = mask.repeat(N, 1)
+
+        # sort entries
+        ids_shuffle = torch.argsort(mask, dim=1)  # ascend: small is keep, large is remove
+        ids_restore = torch.argsort(ids_shuffle, dim=1)
+
+        # keep the first subset
+        ids_keep = ids_shuffle[:, :len_keep]
+        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+
+        # generate the binary mask: 0 is keep, 1 is remove
+        mask = torch.ones([N, L], device=x.device)
         mask[:, :len_keep] = 0
         # unshuffle to get the binary mask
         mask = torch.gather(mask, dim=1, index=ids_restore)
@@ -195,7 +222,7 @@ class MaskedAutoencoderViT(nn.Module):
 
         return x_masked, mask, ids_restore
 
-    def forward_encoder(self, x, mask_ratio, mask_mode):
+    def forward_encoder(self, x, mask_ratio, mask_mode, mask=None):
         """
         Encodes visible patches.
 
@@ -213,6 +240,8 @@ class MaskedAutoencoderViT(nn.Module):
         # masking: length -> length * mask_ratio
         if mask_mode == 'random':
             x, mask, ids_restore = self.random_masking(x, mask_ratio)
+        elif mask_mode == 'discrete':
+            x, mask, ids_restore = self.discrete_masking(x, mask)
         else:
             x, mask, ids_restore = self.quadrant_masking(x, mask_ratio)
 
@@ -261,13 +290,13 @@ class MaskedAutoencoderViT(nn.Module):
 
         return x
 
-    def forward_loss(self, imgs, pred, mask):
+    def forward_loss(self, imgs, pred, mask_patches):
         """
         Computes MSE loss over visbile patches.
 
         :param imgs: [N, 3, H, W]
         :param pred: [N, L, p*p*3]
-        :param mask: [N, L], 0 is keep, 1 is remove
+        :param mask_patches: [N, L], 0 is keep, 1 is remove
         :return: float
         """
         target = self.patchify(imgs)
@@ -279,7 +308,7 @@ class MaskedAutoencoderViT(nn.Module):
         loss = (pred - target) ** 2
         loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
 
-        loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
+        loss = (loss * mask_patches).sum() / mask_patches.sum()  # mean loss on removed patches
         return loss
     
     def forward_boundary_loss(self, imgs):
@@ -297,12 +326,34 @@ class MaskedAutoencoderViT(nn.Module):
             loss += (imgs[:,:,:,i*p-1] - imgs[:,:,:,i*p]).abs().mean()
         return loss / (n-1) / 2
     
-    def forward(self, imgs, mask_ratio=0.75, mask_mode='random'):
-        latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio, mask_mode)
-        pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
-        loss = self.forward_loss(imgs, pred, mask)
-        return loss, pred, mask
+    def forward_loss_discrete(self, imgs, pred, mask_patches, mask):
+        # prepare mask patches
+        patch_size = self.patch_embed.patch_size[0]
+        mask_patches = mask_patches.unsqueeze(-1).repeat(1, 1, patch_size**2 *3)  # (N, H*W, p*p*3)
+        mask_patches = self.unpatchify(mask_patches)[:,:1,:,:] # use a single channel
+        # prepare irregular mask
+        mask = mask.unsqueeze(0)
+        # compute loss over mask diff
+        mask_diff = mask_patches - mask
+        loss = (self.unpatchify(pred) - imgs)**2
+        loss = (loss * mask_diff).sum() / mask_diff.sum()
+        return loss
+    
+    def soften_mask(self, mask):
+        mask_soft = gaussian_blur(mask, kernel_size=7, sigma=2.0)
+        return torch.minimum(mask_soft, mask)
 
+    def forward(self, imgs, mask_ratio=0.75, mask_mode='random', mask=None):
+        latent, mask_patches, ids_restore = self.forward_encoder(imgs, mask_ratio, mask_mode, mask)
+        pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
+        loss = self.forward_loss(imgs, pred, mask_patches)
+        return loss, pred, mask_patches
+
+    def forward_discrete(self, imgs, mask_ratio=0.75, mask_mode='discrete', mask=None):
+        latent, mask_patches, ids_restore = self.forward_encoder(imgs, mask_ratio, mask_mode, mask)
+        pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
+        loss = self.forward_loss_discrete(imgs, pred, mask_patches, mask)
+        return loss, pred, mask_patches
 
 def mae_vit_base_patch16_dec512d8b(**kwargs):
     model = MaskedAutoencoderViT(
