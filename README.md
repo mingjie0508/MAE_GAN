@@ -14,12 +14,12 @@ pip install -r requirements.txt
 17095 RGB images, 80% for training, 20% for testing
 
 ## Run
-```train_gan.ipynb```: training MSE-GAN
+```train_gan.ipynb```: MAE-GAN training and visualization
 
-```train_ganpercep.ipynb```: training MAE-GAN + perceptual loss
+```train_ganpercep.ipynb```: MAE-GAN + perceptual loss training and visualization
 
-```train_ganbound.ipynb```: training MAE-GAN + boundary loss
+```train_ganbound.ipynb```: MAE-GAN + boundary loss training and visualization
 
-```train_ganbound_percep.ipynb```: training MAE-GAN + boundary loss + perceptual loss
+```train_ganbound_percep.ipynb```: MAE-GAN + boundary loss + perceptual loss training and visualization
 
-```train_iprompt.ipynb```: training MAE-GAN + boundary loss + perceptual loss for image prompting
+```train_iprompt.ipynb```: MAE-GAN + boundary loss + perceptual loss for image prompting, training and visualization
